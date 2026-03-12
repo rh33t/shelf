@@ -1,0 +1,22 @@
+# binary
+shelf
+
+# build artifacts
+*.upx
+dist/
+
+# Go
+*.test
+*.out
+/vendor/
+
+# env
+.env
+.env.*
+
+# editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
