@@ -1,8 +1,11 @@
+//go:build linux
+
 package main
 
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -12,6 +15,13 @@ import (
 )
 
 func main() {
+
+	cfg, err := fs.LoadConfig()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		os.Exit(1)
+	}
+
 	mode := ""
 	if len(os.Args) >= 2 {
 		mode = os.Args[1]
@@ -21,7 +31,7 @@ func main() {
 		}
 	}
 
-	p := tea.NewProgram(model.New(mode), tea.WithAltScreen())
+	p := tea.NewProgram(model.New(mode, cfg), tea.WithAltScreen())
 	final, err := p.Run()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error: %v\n", err)
@@ -35,15 +45,11 @@ func main() {
 	}
 
 	if fm.SelectedPath != "" {
-		// Derive the tmux session name from the selected directory name.
 		sessionName := filepath.Base(fm.SelectedPath)
 
-		// Spawn a tmux session rooted at the selected path.
-		// If not inside tmux, print the attach command for the caller to run.
-		if err := fs.SpawnTmux(sessionName, fm.SelectedPath); err != nil {
-			fmt.Fprintf(os.Stderr, "tmux: %v\n", err)
-		} else if os.Getenv("TMUX") == "" {
-			fmt.Printf("tmux attach -t %s\n", sessionName)
+		cmd := cfg.ExpandCmd(sessionName, fm.SelectedPath)
+		if err := exec.Command("sh", "-c", cmd).Run(); err != nil {
+			fmt.Fprintf(os.Stderr, "cmd: %v\n", err)
 		}
 	}
 }

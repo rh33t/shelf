@@ -106,13 +106,17 @@ type Model struct {
 	Err          error
 
 	statusMsg string
+
+	cfg *fs.Config
 }
 
-func New(mode string) Model {
+func New(mode string, cfg *fs.Config) Model {
+	initStyles(cfg.PrimaryColor, cfg.SecondaryColor)
 	m := Model{
 		mode:   mode,
 		width:  80,
 		height: 24,
+		cfg:    cfg,
 	}
 	if mode == "" {
 		m.state = stateModeSelect
@@ -133,7 +137,6 @@ func New(mode string) Model {
 	}
 	return m
 }
-
 
 func baseDirForMode(mode string) string {
 	if mode == "ctf" {

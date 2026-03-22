@@ -15,8 +15,8 @@ Terminal UI for managing CTF and box workspaces. Organizes a lab directory struc
 
 ## Requirements
 
-- Unix-like OS (Linux, macOS, WSL)
-- `tmux`
+- Linux
+- `tmux` (or any tool configured via `cmd`)
 
 ## Build
 
@@ -34,7 +34,25 @@ shelf ctf    # launch in CTF mode
 shelf box    # launch in box mode
 ```
 
-Set `$SHELF_BASE_DIR` to override the default workspace root (`~/work`). On selection, a tmux session is created or reused for the target directory.
+Set `$SHELF_BASE_DIR` to override the default workspace root (`~/work`).
+
+## Configuration
+
+Config is auto-created at `~/.config/shelf/config.yaml` on first launch.
+
+| Field | Description | Default |
+|-------|-------------|---------|
+| `primary_color` | Accent color (hex) | `#7aa2f7` |
+| `secondary_color` | Background color (hex) | `#1a1b26` |
+| `cmd` | Command to run after selecting a directory | `xdg-open $path` |
+
+`$session` and `$path` are substituted with the directory name and full path respectively.
+
+**tmux example:**
+
+```yaml
+cmd: "tmux new-session -ds $session -c $path 2>/dev/null; tmux switch-client -t $session 2>/dev/null || true"
+```
 
 ## Keybindings
 
@@ -50,6 +68,3 @@ Set `$SHELF_BASE_DIR` to override the default workspace root (`~/work`). On sele
 | `d` | Delete entry |
 | `q` | Quit |
 
-## Todo
-
-- [ ] Support custom commands on selection instead of spawning a tmux session
