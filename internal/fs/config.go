@@ -27,7 +27,7 @@ func defaults() Config {
 	return Config{
 		PrimaryColor:   "#7aa2f7",
 		SecondaryColor: "#1a1b26",
-		Cmd:            "xdg-open $path",
+		Cmd:            "tmux new-session -ds $session -c $path 2>/dev/null; tmux switch-client -t $session 2>/dev/null || true",
 	}
 }
 
