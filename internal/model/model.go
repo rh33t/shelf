@@ -21,9 +21,9 @@ type appState int
 
 const (
 	stateModeSelect appState = iota
-	statePlatform
-	stateCategory
-	stateItem
+	stateLevel0              // ctf source / box platform
+	stateLevel1              // ctf category
+	stateLeaf                // challenge / box
 	stateInput
 	stateRename
 	stateConfirm
@@ -36,16 +36,18 @@ type confirmKind int
 const (
 	confirmSlugify confirmKind = iota
 	confirmDelete
-	confirmGenCategories
 )
 
 // Custom item delegate
 
-type item struct{ name string }
+type item struct {
+	name string
+	// ghost marks a configured default that is not on disk yet. It is listed
+	// so it can be picked, and created only when it is.
+	ghost bool
+}
 
 func (i item) FilterValue() string { return i.name }
-func (i item) Title() string       { return i.name }
-func (i item) Description() string { return "" }
 
 type itemDelegate struct{}
 
@@ -58,15 +60,31 @@ func (d itemDelegate) Render(w io.Writer, m list.Model, index int, listItem list
 	if !ok {
 		return
 	}
-	if m.IsFiltered() && index != m.Index() {
-		fmt.Fprint(w, dimItemStyle.Render("     "+i.name))
-		return
+
+	selected := index == m.Index()
+
+	gutter := strings.Repeat(" ", gutterCol)
+	style := normalItemStyle
+	switch {
+	case selected:
+		gutter = markerStyle.Render(marker) + strings.Repeat(" ", gutterCol-lipgloss.Width(marker))
+		style = selectedItemStyle
+	case m.FilterState() == list.Filtering:
+		style = dimItemStyle
+	case i.ghost:
+		style = ghostItemStyle
 	}
-	if index == m.Index() {
-		fmt.Fprint(w, selectedItemStyle.Render("  ▶  "+i.name))
-	} else {
-		fmt.Fprint(w, normalItemStyle.Render("     "+i.name))
+
+	line := strings.Repeat(" ", padCol) + gutter + style.Render(i.name)
+
+	if i.ghost {
+		gap := m.Width() - padCol - textCol - lipgloss.Width(i.name) - len(ghostTag)
+		if gap > 0 {
+			line += strings.Repeat(" ", gap) + ghostTagStyle.Render(ghostTag)
+		}
 	}
+
+	fmt.Fprint(w, line)
 }
 
 // History
@@ -74,7 +92,6 @@ func (d itemDelegate) Render(w io.Writer, m list.Model, index int, listItem list
 type histEntry struct {
 	state      appState
 	currentDir string
-	label      string
 }
 
 // Model
@@ -111,7 +128,6 @@ type Model struct {
 }
 
 func New(mode string, cfg *fs.Config) Model {
-	initStyles(cfg.PrimaryColor, cfg.SecondaryColor)
 	m := Model{
 		mode:   mode,
 		width:  80,
@@ -120,56 +136,93 @@ func New(mode string, cfg *fs.Config) Model {
 	}
 	if mode == "" {
 		m.state = stateModeSelect
-		m.label = "mode"
-		m = m.initList([]string{"ctf", "box"}, "Select Mode")
-	} else {
-		baseDir := baseDirForMode(mode)
-		if err := fs.MkdirAll(baseDir); err != nil {
-			m.Err = err
-			m.state = stateDone
-			return m
-		}
-		m.baseDir = baseDir
-		m.currentDir = baseDir
-		m.state = statePlatform
-		m.label = "platform"
 		m = m.loadList()
+		return m
 	}
-	return m
+
+	baseDir := m.baseDirForMode(mode)
+	if err := fs.MkdirAll(baseDir); err != nil {
+		m.Err = err
+		m.state = stateDone
+		return m
+	}
+	m.baseDir = baseDir
+	m.currentDir = baseDir
+	m.state = stateLevel0
+	return m.loadList()
 }
 
-func baseDirForMode(mode string) string {
+func (m Model) baseDirForMode(mode string) string {
 	if mode == "ctf" {
-		return filepath.Join(labDir, "training", "challenges")
+		return filepath.Join(m.cfg.BaseDir, "challenges")
 	}
-	return filepath.Join(labDir, "training", "boxes")
+	return filepath.Join(m.cfg.BaseDir, "boxes")
+}
+
+// levelLabel names the thing being picked at the current level.
+func (m Model) levelLabel() string {
+	switch m.state {
+	case stateLevel0:
+		if m.mode == "ctf" {
+			return "source"
+		}
+		return "platform"
+	case stateLevel1:
+		return "category"
+	case stateLeaf:
+		if m.mode == "ctf" {
+			return "challenge"
+		}
+		return "box"
+	}
+	return ""
+}
+
+// defaultsForLevel returns the configured entries offered at this level. They
+// are listed whether or not they exist and created only on selection.
+func (m Model) defaultsForLevel() []string {
+	switch {
+	case m.state == stateLevel0 && m.mode == "ctf":
+		return m.cfg.CTFSources
+	case m.state == stateLevel0 && m.mode == "box":
+		return m.cfg.BoxPlatforms
+	case m.state == stateLevel1 && m.mode == "ctf":
+		return m.cfg.CTFCategories
+	}
+	return nil
 }
 
 // List helpers
 
-func (m Model) initList(names []string, title string) Model {
-	items := make([]list.Item, len(names))
-	for i, n := range names {
-		items[i] = item{n}
+func (m Model) listHeight() int {
+	// header, blank, label row, blank, status, footer
+	return max(m.height-6, 3)
+}
+
+func (m Model) initList(items []item) Model {
+	li := make([]list.Item, len(items))
+	for i, it := range items {
+		li[i] = it
 	}
 
-	listHeight := max(m.height-4, 4)
-
-	l := list.New(items, itemDelegate{}, m.width, listHeight)
-	l.Title = title
-	l.Styles.Title = titleStyle
+	l := list.New(li, itemDelegate{}, m.width, m.listHeight())
+	l.SetShowTitle(false)
+	l.SetShowFilter(false) // the filter prompt is drawn on the status row
 	l.SetShowStatusBar(false)
 	l.SetShowHelp(false)
+	l.SetShowPagination(false)
 	l.SetFilteringEnabled(true)
-	l.Styles.FilterPrompt = lipgloss.NewStyle().Foreground(lipgloss.Color(primary)).PaddingLeft(4).PaddingTop(2)
-	l.Styles.NoItems = lipgloss.NewStyle().Foreground(lipgloss.Color("240")).PaddingLeft(5)
+	l.FilterInput.Prompt = "/"
+	l.FilterInput.PromptStyle = lipgloss.NewStyle().Foreground(accent)
 	m.list = l
 	return m
 }
 
 func (m Model) loadList() Model {
+	m.label = m.levelLabel()
+
 	if m.state == stateModeSelect {
-		return m.initList([]string{"ctf", "box"}, m.listTitle())
+		return m.initList([]item{{name: "ctf"}, {name: "box"}})
 	}
 
 	dirs, err := fs.ListDirs(m.currentDir)
@@ -178,45 +231,29 @@ func (m Model) loadList() Model {
 		dirs = nil
 	}
 
-	var names []string
-	if m.mode == "box" && m.state == statePlatform {
-		seen := map[string]bool{}
-		for _, p := range boxPlatforms {
-			seen[p] = true
-			names = append(names, p)
+	items := make([]item, 0, len(dirs))
+	seen := make(map[string]bool, len(dirs))
+	for _, d := range dirs {
+		seen[d] = true
+		items = append(items, item{name: d})
+	}
+	for _, d := range m.defaultsForLevel() {
+		if !seen[d] {
+			items = append(items, item{name: d, ghost: true})
 		}
-		for _, d := range dirs {
-			if !seen[d] {
-				names = append(names, d)
-			}
-		}
-	} else {
-		names = dirs
 	}
 
-	return m.initList(names, m.listTitle())
+	return m.initList(items)
 }
 
-func (m Model) listTitle() string {
+func (m Model) sectionLabel() string {
 	switch m.state {
 	case stateModeSelect:
-		return "Training Manager"
-	case statePlatform:
-		if m.mode == "ctf" {
-			return "CTF — Select Platform"
-		}
-		return "Box — Select Platform"
-	case stateCategory:
-		return "CTF — Select Category"
-	case stateItem:
-		if m.mode == "ctf" {
-			return "CTF — Select Challenge"
-		}
-		return "Box — Select Box"
+		return "MODE"
 	case stateSearch:
-		return "Jump To"
+		return "JUMP TO"
 	}
-	return ""
+	return strings.ToUpper(m.label)
 }
 
 // tea.Model
@@ -228,8 +265,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
-		listHeight := max(m.height-4, 4)
-		m.list.SetSize(msg.Width, listHeight)
+		m.list.SetSize(msg.Width, m.listHeight())
 		return m, nil
 	case tea.KeyMsg:
 		return m.handleKey(msg)
@@ -240,7 +276,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 func (m Model) delegateUpdate(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmd tea.Cmd
 	switch m.state {
-	case stateModeSelect, statePlatform, stateCategory, stateItem, stateSearch:
+	case stateModeSelect, stateLevel0, stateLevel1, stateLeaf, stateSearch:
 		m.list, cmd = m.list.Update(msg)
 	case stateInput, stateRename:
 		m.input, cmd = m.input.Update(msg)
@@ -248,22 +284,27 @@ func (m Model) delegateUpdate(msg tea.Msg) (tea.Model, tea.Cmd) {
 	return m, cmd
 }
 
-func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
-	isListState := m.state == stateModeSelect || m.state == statePlatform ||
-		m.state == stateCategory || m.state == stateItem || m.state == stateSearch
+func (m Model) isListState() bool {
+	switch m.state {
+	case stateModeSelect, stateLevel0, stateLevel1, stateLeaf, stateSearch:
+		return true
+	}
+	return false
+}
 
-	if isListState && m.list.FilterState() == list.Filtering {
+func (m Model) handleKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if m.isListState() && m.list.FilterState() == list.Filtering {
 		var cmd tea.Cmd
 		m.list, cmd = m.list.Update(msg)
 		return m, cmd
 	}
 
-	switch m.state {
-	case stateModeSelect, statePlatform, stateCategory, stateItem, stateSearch:
+	switch {
+	case m.isListState():
 		return m.handleListKey(msg)
-	case stateInput, stateRename:
+	case m.state == stateInput || m.state == stateRename:
 		return m.handleInputKey(msg)
-	case stateConfirm:
+	case m.state == stateConfirm:
 		return m.handleConfirmKey(msg)
 	}
 	return m, nil
@@ -276,7 +317,9 @@ func (m Model) handleListKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "q", "ctrl+c":
 		return m, tea.Quit
 
-	case "esc":
+	// left/h and right/l are bound to pagination by the list widget. Claiming
+	// them here shadows that, so they walk the tree the way yazi does.
+	case "esc", "left", "h":
 		if m.list.FilterState() == list.FilterApplied {
 			m.list.ResetFilter()
 			return m, nil
@@ -289,7 +332,7 @@ func (m Model) handleListKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m.startSearch()
 
-	case "enter", " ":
+	case "enter", " ", "right", "l":
 		sel := m.list.SelectedItem()
 		if sel == nil {
 			return m, nil
@@ -301,6 +344,14 @@ func (m Model) handleListKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				m.Err = err
 				m.state = stateDone
 				return m, tea.Quit
+			}
+			// Only a target is worth opening. Jumping to a level above one
+			// browses into it instead, so esc still returns where ctrl+f began.
+			if !m.isTarget(path) {
+				m.currentDir = path
+				m.state = m.currentListState()
+				m.searchBase = ""
+				return m.loadList(), nil
 			}
 			return m.finish(path)
 		}
@@ -334,30 +385,42 @@ func (m Model) handleListKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m.startCreate()
 
 	case "d":
-		if m.state == stateSearch || m.state == stateModeSelect {
+		sel, ok := m.editableSelection()
+		if !ok {
 			return m, nil
 		}
-		sel := m.list.SelectedItem()
-		if sel == nil {
-			return m, nil
-		}
-		return m.startDelete(sel.(item).name)
+		return m.startDelete(sel.name)
 
 	case "r":
-		if m.state == stateSearch || m.state == stateModeSelect {
+		sel, ok := m.editableSelection()
+		if !ok {
 			return m, nil
 		}
-		sel := m.list.SelectedItem()
-		if sel == nil {
-			return m, nil
-		}
-		return m.startRename(sel.(item).name)
+		return m.startRename(sel.name)
 
 	default:
 		var cmd tea.Cmd
 		m.list, cmd = m.list.Update(msg)
 		return m, cmd
 	}
+}
+
+// editableSelection returns the highlighted item if it can be renamed or
+// deleted. A ghost has nothing on disk to act on.
+func (m *Model) editableSelection() (item, bool) {
+	if m.state == stateSearch || m.state == stateModeSelect {
+		return item{}, false
+	}
+	sel := m.list.SelectedItem()
+	if sel == nil {
+		return item{}, false
+	}
+	it := sel.(item)
+	if it.ghost {
+		m.statusMsg = warnStyle.Render(fmt.Sprintf("'%s' does not exist yet.", it.name))
+		return item{}, false
+	}
+	return it, true
 }
 
 func (m Model) handleInputKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
@@ -391,12 +454,9 @@ func (m Model) handleConfirmKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 // Actions
 
 func (m Model) selectItem(name string) (tea.Model, tea.Cmd) {
-	dir := filepath.Join(m.currentDir, name)
-
-	switch m.state {
-	case stateModeSelect:
+	if m.state == stateModeSelect {
 		m.mode = name
-		m.baseDir = baseDirForMode(name)
+		m.baseDir = m.baseDirForMode(name)
 		if err := fs.MkdirAll(m.baseDir); err != nil {
 			m.Err = err
 			m.state = stateDone
@@ -404,69 +464,44 @@ func (m Model) selectItem(name string) (tea.Model, tea.Cmd) {
 		}
 		m.pushHistory(stateModeSelect)
 		m.currentDir = m.baseDir
-		m.state = statePlatform
-		m.label = "platform"
-		m = m.loadList()
-		return m, nil
+		m.state = stateLevel0
+		return m.loadList(), nil
+	}
 
-	case statePlatform:
-		if err := fs.MkdirAll(dir); err != nil {
-			m.statusMsg = errorStyle.Render(fmt.Sprintf("Error: %v", err))
-			return m, nil
-		}
-		if m.mode == "ctf" {
-			existing, _ := fs.ListDirs(dir)
-			if len(existing) == 0 {
-				m.pushHistory(statePlatform)
-				m.cKind = confirmGenCategories
-				m.cMsg = fmt.Sprintf("Platform '%s' is empty.\nGenerate default CTF categories?", name)
-				m.cPending = dir
-				m.currentDir = dir
-				m.label = "category"
-				m.state = stateConfirm
-				return m, nil
-			}
-			m.pushHistory(statePlatform)
-			m.currentDir = dir
-			m.state = stateCategory
-			m.label = "category"
-		} else {
-			m.pushHistory(statePlatform)
-			m.currentDir = dir
-			m.state = stateItem
-			m.label = "box"
-		}
-		m = m.loadList()
+	dir := filepath.Join(m.currentDir, name)
+	if err := fs.MkdirAll(dir); err != nil {
+		m.statusMsg = errorStyle.Render(fmt.Sprintf("Error: %v", err))
 		return m, nil
+	}
 
-	case stateCategory:
-		if err := fs.MkdirAll(dir); err != nil {
-			m.statusMsg = errorStyle.Render(fmt.Sprintf("Error: %v", err))
-			return m, nil
-		}
-		m.pushHistory(stateCategory)
-		m.currentDir = dir
-		m.state = stateItem
-		m.label = "challenge"
-		m = m.loadList()
-		return m, nil
-
-	case stateItem:
-		if err := fs.MkdirAll(dir); err != nil {
-			m.Err = err
-			m.state = stateDone
-			return m, tea.Quit
-		}
-		if m.mode == "box" {
-			notesPath := filepath.Join(dir, "notes.md")
-			if _, statErr := os.Stat(notesPath); os.IsNotExist(statErr) {
-				platform := filepath.Base(m.currentDir)
-				_ = fs.WriteNotesTemplate(dir, platform, name)
-			}
-		}
+	if m.state == stateLeaf {
+		m.writeNotes(dir, name)
 		return m.finish(dir)
 	}
-	return m, nil
+
+	m.pushHistory(m.state)
+	m.currentDir = dir
+	if m.state == stateLevel0 && m.mode == "ctf" {
+		m.state = stateLevel1
+	} else {
+		m.state = stateLeaf
+	}
+	return m.loadList(), nil
+}
+
+// writeNotes seeds notes.md for a newly picked target, leaving an existing one
+// alone. currentDir is the parent level: the platform for a box, the category
+// for a challenge.
+func (m Model) writeNotes(dir, name string) {
+	if _, err := os.Stat(filepath.Join(dir, "notes.md")); !os.IsNotExist(err) {
+		return
+	}
+	if m.mode == "box" {
+		_ = fs.WriteBoxNotes(dir, filepath.Base(m.currentDir), name)
+		return
+	}
+	source := filepath.Base(filepath.Dir(m.currentDir))
+	_ = fs.WriteChallengeNotes(dir, source, filepath.Base(m.currentDir), name)
 }
 
 func (m Model) finish(path string) (tea.Model, tea.Cmd) {
@@ -483,21 +518,15 @@ func (m Model) goBack() (tea.Model, tea.Cmd) {
 	m.history = m.history[:len(m.history)-1]
 	m.state = entry.state
 	m.currentDir = entry.currentDir
-	m.label = entry.label
 	m.statusMsg = ""
 	if entry.state == stateModeSelect {
 		m.mode = ""
 	}
-	m = m.loadList()
-	return m, nil
+	return m.loadList(), nil
 }
 
 func (m *Model) pushHistory(s appState) {
-	m.history = append(m.history, histEntry{
-		state:      s,
-		currentDir: m.currentDir,
-		label:      m.label,
-	})
+	m.history = append(m.history, histEntry{state: s, currentDir: m.currentDir})
 }
 
 func (m Model) startSearch() (tea.Model, tea.Cmd) {
@@ -509,7 +538,13 @@ func (m Model) startSearch() (tea.Model, tea.Cmd) {
 	m.pushHistory(m.state)
 	m.searchBase = m.currentDir
 	m.state = stateSearch
-	m = m.initList(dirs, "Jump To")
+
+	items := make([]item, len(dirs))
+	for i, d := range dirs {
+		items[i] = item{name: d}
+	}
+	m = m.initList(items)
+
 	return m, func() tea.Msg {
 		return tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{'/'}}
 	}
@@ -518,7 +553,7 @@ func (m Model) startSearch() (tea.Model, tea.Cmd) {
 func (m Model) startCreate() (tea.Model, tea.Cmd) {
 	m.inputLabel = "create"
 	ti := textinput.New()
-	ti.Placeholder = fmt.Sprintf("new %s name...", m.label)
+	ti.Placeholder = "name..."
 	ti.CharLimit = 200
 	cmd := ti.Focus()
 	m.input = ti
@@ -540,7 +575,7 @@ func (m Model) startRename(name string) (tea.Model, tea.Cmd) {
 	m.renameOld = name
 	m.inputLabel = "rename"
 	ti := textinput.New()
-	ti.Placeholder = "new name..."
+	ti.Placeholder = "name..."
 	ti.CharLimit = 200
 	ti.SetValue(name)
 	cmd := ti.Focus()
@@ -558,14 +593,14 @@ func (m Model) confirmInput() (tea.Model, tea.Cmd) {
 	}
 	slug := fs.Slugify(raw)
 	if slug == "" {
-		m.statusMsg = errorStyle.Render("Invalid name — nothing left after slugifying.")
+		m.statusMsg = errorStyle.Render("Invalid name, nothing left after slugifying.")
 		return m, nil
 	}
 
 	if slug != raw {
-		// Show slugify warning — enter will auto-confirm it.
+		// Show slugify warning, enter will auto-confirm it.
 		m.cKind = confirmSlugify
-		m.cMsg = fmt.Sprintf("'%s'  →  '%s'", raw, slug)
+		m.cMsg = fmt.Sprintf("'%s'   →   '%s'", raw, slug)
 		m.cPending = slug
 		m.state = stateConfirm
 		return m, nil
@@ -596,22 +631,12 @@ func (m Model) confirmAction() (tea.Model, tea.Cmd) {
 		}
 		m.statusMsg = successStyle.Render(fmt.Sprintf("Deleted '%s'.", filepath.Base(m.cPending)))
 		return m.backToList()
-
-	case confirmGenCategories:
-		for _, cat := range ctfCategories {
-			_ = fs.MkdirAll(filepath.Join(m.cPending, cat))
-		}
-		m.statusMsg = successStyle.Render("Default categories created.")
-		m.state = stateCategory
-		m = m.loadList()
-		return m, nil
 	}
 	return m.backToList()
 }
 
 func (m Model) cancelConfirm() (tea.Model, tea.Cmd) {
-	switch m.cKind {
-	case confirmSlugify:
+	if m.cKind == confirmSlugify {
 		cmd := m.input.Focus()
 		if m.inputLabel == "rename" {
 			m.state = stateRename
@@ -619,11 +644,8 @@ func (m Model) cancelConfirm() (tea.Model, tea.Cmd) {
 			m.state = stateInput
 		}
 		return m, cmd
-	case confirmGenCategories:
-		return m.goBack()
-	default:
-		return m.backToList()
 	}
+	return m.backToList()
 }
 
 func (m Model) doCreate(name string) (tea.Model, tea.Cmd) {
@@ -633,8 +655,7 @@ func (m Model) doCreate(name string) (tea.Model, tea.Cmd) {
 		return m.backToList()
 	}
 	m2, _ := m.backToList()
-	mm := m2.(Model)
-	return mm.selectItem(name)
+	return m2.(Model).selectItem(name)
 }
 
 func (m Model) doRename(newName string) (tea.Model, tea.Cmd) {
@@ -647,34 +668,43 @@ func (m Model) doRename(newName string) (tea.Model, tea.Cmd) {
 		m.statusMsg = errorStyle.Render(fmt.Sprintf("Error renaming: %v", err))
 		return m.backToList()
 	}
-	m.statusMsg = successStyle.Render(fmt.Sprintf("'%s'  →  '%s'", m.renameOld, newName))
+	m.statusMsg = successStyle.Render(fmt.Sprintf("'%s' → '%s'", m.renameOld, newName))
 	return m.backToList()
 }
 
 func (m Model) backToList() (tea.Model, tea.Cmd) {
 	m.state = m.currentListState()
-	m = m.loadList()
-	return m, nil
+	return m.loadList(), nil
 }
 
+// isTarget reports whether path is a challenge or a box, the deepest level and
+// the only one shelf opens a session on.
+func (m Model) isTarget(path string) bool {
+	rel, err := filepath.Rel(m.baseDir, path)
+	if err != nil || rel == "." {
+		return false
+	}
+	depth := len(strings.Split(rel, string(filepath.Separator)))
+	if m.mode == "ctf" {
+		return depth >= 3
+	}
+	return depth >= 2
+}
+
+// currentListState recovers the level from how deep currentDir sits under the
+// mode root, for returning from a modal.
 func (m Model) currentListState() appState {
 	if m.mode == "" {
 		return stateModeSelect
 	}
 	rel, err := filepath.Rel(m.baseDir, m.currentDir)
 	if err != nil || rel == "." {
-		return statePlatform
+		return stateLevel0
 	}
-	parts := strings.Split(rel, string(filepath.Separator))
-	switch len(parts) {
-	case 1:
-		if m.mode == "ctf" {
-			return stateCategory
-		}
-		return stateItem
-	default:
-		return stateItem
+	if len(strings.Split(rel, string(filepath.Separator))) == 1 && m.mode == "ctf" {
+		return stateLevel1
 	}
+	return stateLeaf
 }
 
 // View
@@ -684,31 +714,40 @@ func (m Model) View() string {
 		if m.Err != nil {
 			return errorStyle.Render(fmt.Sprintf("Error: %v\n", m.Err))
 		}
-		return successStyle.Render("✓ "+m.SelectedPath) + "\n"
+		return ""
 	}
 	switch m.state {
-	case stateModeSelect, statePlatform, stateCategory, stateItem, stateSearch:
-		return m.viewList()
 	case stateInput, stateRename:
 		return m.viewInput()
 	case stateConfirm:
 		return m.viewConfirm()
 	}
-	return ""
+	return m.viewList()
 }
 
 func (m Model) viewList() string {
-	statusLine := "  " + m.statusMsg // always one line, blank when empty
-	return m.renderHeader() + "\n" +
-		m.list.View() + "\n" +
-		statusLine + "\n" +
-		m.renderFooter()
+	return strings.Join([]string{
+		m.renderHeader(),
+		"",
+		m.renderLabel(),
+		"",
+		m.listBody(),
+		m.renderStatus(),
+		m.renderFooter(),
+	}, "\n")
+}
+
+func (m Model) listBody() string {
+	if len(m.list.VisibleItems()) == 0 && m.list.FilterState() != list.Filtering {
+		return lipgloss.NewStyle().Height(m.listHeight()).Render(noItemsStyle.Render("nothing here yet"))
+	}
+	return m.list.View()
 }
 
 func (m Model) viewInput() string {
-	action := "create  " + m.label
+	action := "NEW"
 	if m.state == stateRename {
-		action = "rename  " + m.label
+		action = "RENAME"
 	}
 
 	status := ""
@@ -717,20 +756,15 @@ func (m Model) viewInput() string {
 	}
 
 	content := lipgloss.JoinVertical(lipgloss.Left,
-		labelStyle.Render(action),
+		labelStyle.Render(action+" "+strings.ToUpper(m.label)),
 		"",
 		m.input.View(),
 		status,
 		"",
-		helpStyle.Render("enter: confirm  ·  esc: cancel"),
+		helpStyle.Render("enter: confirm   esc: cancel"),
 	)
 
-	box := modalStyle.
-		BorderForeground(lipgloss.Color(primary)).
-		Width(clamp(m.width-20, 40, 70)).
-		Render(content)
-
-	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, box)
+	return m.centered(accent, content)
 }
 
 func (m Model) viewConfirm() string {
@@ -739,16 +773,12 @@ func (m Model) viewConfirm() string {
 
 	switch m.cKind {
 	case confirmDelete:
-		borderColor = lipgloss.Color(primary)
+		borderColor = red
 		heading = deleteStyle.Render("DELETE")
 		body = errorStyle.Render(m.cMsg)
 	case confirmSlugify:
-		borderColor = lipgloss.Color("#e3b341")
-		heading = warnStyle.Render("NAME WILL BE CHANGED")
-		body = m.cMsg
-	case confirmGenCategories:
-		borderColor = lipgloss.Color(primary)
-		heading = labelStyle.Render("GENERATE CATEGORIES")
+		borderColor = yellow
+		heading = warnStyle.Render("RENAMING TO A SLUG")
 		body = m.cMsg
 	}
 
@@ -757,87 +787,94 @@ func (m Model) viewConfirm() string {
 		"",
 		body,
 		"",
-		helpStyle.Render("enter / y: confirm  ·  n / esc: cancel"),
+		helpStyle.Render("enter / y: confirm   n / esc: cancel"),
 	)
 
+	return m.centered(borderColor, content)
+}
+
+func (m Model) centered(border lipgloss.Color, content string) string {
 	box := modalStyle.
-		BorderForeground(borderColor).
+		BorderForeground(border).
 		Width(clamp(m.width-20, 40, 70)).
 		Render(content)
-
 	return lipgloss.Place(m.width, m.height, lipgloss.Center, lipgloss.Center, box)
 }
 
 // UI components
 
-func (m Model) renderHeader() string {
-	left := " CTF TOOL "
-	right := " " + m.breadcrumb() + " "
-
-	leftR := headerLeftStyle.Render(left)
-	rightR := headerRightStyle.Render(right)
-
-	gapW := max(m.width-lipgloss.Width(leftR)-lipgloss.Width(rightR), 0)
-	gap := headerFillStyle.Render(strings.Repeat(" ", gapW))
-	return leftR + gap + rightR
+// spread renders left and right on one line, pushed to opposite edges.
+func (m Model) spread(leftIndent int, left, right string) string {
+	l := strings.Repeat(" ", leftIndent) + left
+	r := right + strings.Repeat(" ", padCol)
+	gap := max(m.width-lipgloss.Width(l)-lipgloss.Width(r), 0)
+	return l + strings.Repeat(" ", gap) + r
 }
 
-func (m Model) renderFooter() string {
-	type kv struct{ k, v string }
-	var pairs []kv
+func (m Model) renderHeader() string {
+	return m.spread(padCol, appNameStyle.Render("shelf"), crumbStyle.Render(m.breadcrumb()))
+}
+
+func (m Model) renderLabel() string {
+	return m.spread(textCol, sectionStyle.Render(m.sectionLabel()), counterStyle.Render(m.counter()))
+}
+
+func (m Model) counter() string {
+	n := len(m.list.VisibleItems())
+	if n == 0 {
+		return "0/0"
+	}
+	return fmt.Sprintf("%d/%d", m.list.Index()+1, n)
+}
+
+func (m Model) renderStatus() string {
 	if m.list.FilterState() == list.Filtering {
-		pairs = []kv{{"/", "filter"}, {"esc", "cancel"}}
-	} else if m.state == stateSearch {
-		pairs = []kv{
-			{"↑↓", "navigate"}, {"enter", "select"},
-			{"/", "filter"}, {"esc", "back"},
-		}
-	} else if m.state == stateModeSelect {
-		pairs = []kv{
-			{"↑↓", "navigate"}, {"enter", "select"},
-			{"/", "filter"}, {"q", "quit"},
-		}
-	} else {
-		pairs = []kv{
-			{"↑↓", "navigate"}, {"enter", "select"},
-			{"n", "new"}, {"/", "filter"},
-			{"d", "delete"}, {"r", "rename"},
-			{"ctrl+f", "search"}, {"esc", "back"}, {"q", "quit"},
+		return strings.Repeat(" ", textCol) + m.list.FilterInput.View()
+	}
+	if m.statusMsg == "" {
+		return ""
+	}
+	return strings.Repeat(" ", textCol) + m.statusMsg
+}
+
+type keyHint struct{ k, v string }
+
+func (m Model) renderFooter() string {
+	var hints []keyHint
+	switch {
+	case m.list.FilterState() == list.Filtering:
+		hints = []keyHint{{"⏎", "apply"}, {"esc", "cancel"}}
+	case m.state == stateSearch:
+		hints = []keyHint{{"↑↓", "move"}, {"⏎", "open"}, {"esc", "back"}}
+	case m.state == stateModeSelect:
+		hints = []keyHint{{"↑↓", "move"}, {"⏎", "select"}, {"q", "quit"}}
+	default:
+		// No navigation hint here: the full set overflows 80 columns, and the
+		// mode screen already shows it.
+		hints = []keyHint{
+			{"⏎", "open"}, {"n", "new"}, {"r", "rename"}, {"d", "delete"},
+			{"/", "filter"}, {"^f", "jump"}, {"esc", "back"}, {"q", "quit"},
 		}
 	}
 
-	// Render each element and measure its display width.
-	elems := make([]string, len(pairs))
-	totalElemW := 0
-	for i, p := range pairs {
-		e := footerKeyStyle.Render(p.k) + footerStyle.Render(" "+p.v)
-		elems[i] = e
-		totalElemW += lipgloss.Width(footerKeyStyle.Render(p.k)) + lipgloss.Width(" "+p.v)
+	// Drop hints from the right until the line fits the terminal.
+	for len(hints) > 1 && hintsWidth(hints) > m.width-2*padCol {
+		hints = hints[:len(hints)-1]
 	}
 
-	// Distribute remaining space as equal gaps between (and around) elements.
-	n := len(elems)
-	slots := n + 1 // gaps: before first, between each pair, after last
-	available := max(m.width-totalElemW, slots)
-	baseGap := available / slots
-	extra := available % slots
+	parts := make([]string, len(hints))
+	for i, h := range hints {
+		parts[i] = footerKeyStyle.Render(h.k) + footerStyle.Render(" "+h.v)
+	}
+	return strings.Repeat(" ", padCol) + strings.Join(parts, footerStyle.Render("  "))
+}
 
-	var sb strings.Builder
-	for i, e := range elems {
-		g := baseGap
-		if i < extra {
-			g++
-		}
-		sb.WriteString(footerStyle.Render(strings.Repeat(" ", g)))
-		sb.WriteString(e)
+func hintsWidth(hints []keyHint) int {
+	w := 2 * (len(hints) - 1) // separators
+	for _, h := range hints {
+		w += lipgloss.Width(h.k) + 1 + lipgloss.Width(h.v)
 	}
-	// trailing gap
-	lastGap := baseGap
-	if n < extra {
-		lastGap++
-	}
-	sb.WriteString(footerStyle.Render(strings.Repeat(" ", lastGap)))
-	return sb.String()
+	return w
 }
 
 func (m Model) breadcrumb() string {
@@ -855,7 +892,7 @@ func (m Model) breadcrumb() string {
 			}
 		}
 	}
-	return strings.Join(parts, "  ›  ")
+	return strings.Join(parts, " › ")
 }
 
 // Utilities
@@ -868,24 +905,4 @@ func clamp(v, lo, hi int) int {
 		return hi
 	}
 	return v
-}
-
-func expandHome(path string) string {
-	if len(path) > 0 && path[0] == '~' {
-		if len(path) == 1 || path[1] == '/' {
-			home, _ := os.UserHomeDir()
-			if len(path) == 1 {
-				return home
-			}
-			return filepath.Join(home, path[2:])
-		}
-	}
-	return path
-}
-
-func envOrDefault(key, def string) string {
-	if v := os.Getenv(key); v != "" {
-		return v
-	}
-	return def
 }

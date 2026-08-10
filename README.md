@@ -1,70 +1,53 @@
-# shelf ツ
+# shelf
 
-Terminal UI for managing CTF and box workspaces. Organizes a lab directory structure and spawns a tmux session for the selected target.
+Terminal picker for creating and opening CTF challenge and box workspaces.
 
-<p align="center"><img src="shelf.gif" alt="shelf demo" /></p>
+Shelf runs on Linux. The release binary is built for x86-64 and uses `tmux` by default.
 
-## Modes
-
-| Mode | Structure |
-|------|-----------|
-| `ctf` | `$SHELF_BASE_DIR/training/challenges/<platform>/<category>/<challenge>` |
-| `box` | `$SHELF_BASE_DIR/training/boxes/<platform>/<box>` |
-
-`$SHELF_BASE_DIR` defaults to `~/work`. Directories are created automatically on selection — nothing needs to exist upfront. In CTF mode, selecting an empty platform prompts to generate default categories.
-
-## Requirements
-
-- Linux
-- `tmux` (or any tool configured via `cmd`)
-
-## Build
-
-Produces a static `linux/amd64` binary, compressed with `upx` if available.
+## Install
 
 ```bash
-./build.sh
+mkdir -p "$HOME/.local/bin"
+curl -fsSL https://github.com/rh33t/shelf/releases/latest/download/shelf -o "$HOME/.local/bin/shelf"
+chmod +x "$HOME/.local/bin/shelf"
+shelf --version
+```
+
+Building from source requires Go 1.22 or newer:
+
+```bash
+git clone https://github.com/rh33t/shelf.git
+cd shelf
+go build -trimpath -o shelf .
+install -Dm755 shelf "$HOME/.local/bin/shelf"
 ```
 
 ## Usage
 
-```bash
-shelf        # select mode interactively
-shelf ctf    # launch in CTF mode
-shelf box    # launch in box mode
+Run `shelf`, choose `ctf` or `box`, then select or create a target. `shelf ctf` and `shelf box` skip the first picker.
+
+The default workspace paths are:
+
+```text
+~/work/challenges/<source>/<category>/<challenge>
+~/work/boxes/<platform>/<box>
 ```
 
-Set `$SHELF_BASE_DIR` to override the default workspace root (`~/work`).
+New targets receive a `notes.md` file and open in a tmux session. The main keys are arrow keys or `hjkl` to navigate, `/` to filter, `ctrl+f` to search, `n` to create, `r` to rename, `d` to delete, and `q` to quit.
 
-## Configuration
+Shelf creates `~/.config/shelf/config.yaml` on first use. Run `shelf --config` to print the active path. The file controls the base directory, open command, CTF sources and categories, and box platforms. `SHELF_BASE_DIR` overrides `base_dir`.
 
-Config is auto-created at `~/.config/shelf/config.yaml` on first launch.
-
-| Field | Description | Default |
-|-------|-------------|---------|
-| `primary_color` | Accent color (hex) | `#7aa2f7` |
-| `secondary_color` | Background color (hex) | `#1a1b26` |
-| `cmd` | Command to run after selecting a directory | `xdg-open $path` |
-
-`$session` and `$path` are substituted with the directory name and full path respectively.
-
-**tmux example:**
+For example, open targets in an editor instead of tmux:
 
 ```yaml
-cmd: "tmux new-session -ds $session -c $path 2>/dev/null; tmux switch-client -t $session 2>/dev/null || true"
+cmd: "$EDITOR $path"
 ```
 
-## Keybindings
+The command can use `$session` for the target directory name and `$path` for its full path.
 
-| Key | Action |
-|-----|--------|
-| `↑` `↓` `j` `k` | Navigate |
-| `enter` | Select |
-| `esc` | Go back |
-| `/` | Filter current list |
-| `ctrl+f` | Search all directories from current level |
-| `n` | Create new entry |
-| `r` | Rename entry |
-| `d` | Delete entry |
-| `q` | Quit |
+## Development
 
+```bash
+go test ./...
+go build -o shelf .
+```

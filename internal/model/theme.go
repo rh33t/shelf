@@ -2,72 +2,61 @@ package model
 
 import "github.com/charmbracelet/lipgloss"
 
-var primary, secondary string
+// ANSI 0-15 resolve against the terminal's own palette, so shelf inherits
+// whatever colorscheme is already configured.
+const (
+	accent = lipgloss.Color("4")
+	dim    = lipgloss.Color("8")
+	red    = lipgloss.Color("1")
+	green  = lipgloss.Color("2")
+	yellow = lipgloss.Color("3")
+)
+
+// Every region lines up on one text column. The selection marker hangs in the
+// gutter to its left, so names never shift as the cursor moves.
+const (
+	padCol    = 2
+	gutterCol = 3
+	textCol   = padCol + gutterCol
+)
+
+const (
+	marker   = "▍"
+	ghostTag = "not created"
+)
 
 var (
 	// Header
-	headerLeftStyle  lipgloss.Style
-	headerRightStyle lipgloss.Style
-	headerFillStyle  lipgloss.Style
+	appNameStyle = lipgloss.NewStyle().Foreground(accent).Bold(true)
+	crumbStyle   = lipgloss.NewStyle().Foreground(dim)
 
-	// List title
-	titleStyle lipgloss.Style
+	// Label row
+	sectionStyle = lipgloss.NewStyle().Foreground(dim)
+	counterStyle = lipgloss.NewStyle().Foreground(dim)
 
-	// Item delegate
-	selectedItemStyle lipgloss.Style
-	normalItemStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("#c0c0c0"))
-	dimItemStyle      = lipgloss.NewStyle().Foreground(lipgloss.Color("#555555"))
+	// Items
+	markerStyle       = lipgloss.NewStyle().Foreground(accent)
+	selectedItemStyle = lipgloss.NewStyle().Foreground(accent).Bold(true)
+	normalItemStyle   = lipgloss.NewStyle()
+	ghostItemStyle    = lipgloss.NewStyle().Foreground(dim)
+	ghostTagStyle     = lipgloss.NewStyle().Foreground(dim).Faint(true)
+	dimItemStyle      = lipgloss.NewStyle().Foreground(dim).Faint(true)
+	noItemsStyle      = lipgloss.NewStyle().Foreground(dim).PaddingLeft(textCol)
 
 	// Footer
-	footerStyle    lipgloss.Style
-	footerKeyStyle lipgloss.Style
+	footerStyle    = lipgloss.NewStyle().Foreground(dim)
+	footerKeyStyle = lipgloss.NewStyle().Foreground(accent).Bold(true)
 
-	// Status / feedback
-	successStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("#3fb950"))
-	errorStyle   lipgloss.Style
-	warnStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("#e3b341"))
-	labelStyle   lipgloss.Style
-	deleteStyle  lipgloss.Style
-	helpStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("#555555"))
+	// Status
+	successStyle = lipgloss.NewStyle().Foreground(green)
+	errorStyle   = lipgloss.NewStyle().Foreground(red)
+	warnStyle    = lipgloss.NewStyle().Foreground(yellow)
+	labelStyle   = lipgloss.NewStyle().Bold(true).Foreground(accent)
+	deleteStyle  = lipgloss.NewStyle().Bold(true).Foreground(red)
+	helpStyle    = lipgloss.NewStyle().Foreground(dim)
 
 	// Modal
 	modalStyle = lipgloss.NewStyle().
 			Border(lipgloss.RoundedBorder()).
 			Padding(1, 3)
 )
-
-func initStyles(p, s string) {
-	primary = p
-	secondary = s
-
-	pc := lipgloss.Color(p)
-	sc := lipgloss.Color(s)
-
-	headerLeftStyle = lipgloss.NewStyle().
-		Background(pc).
-		Foreground(lipgloss.Color("#ffffff")).
-		Bold(true)
-	headerRightStyle = lipgloss.NewStyle().
-		Background(pc).
-		Foreground(lipgloss.Color("#ffcccc"))
-	headerFillStyle = lipgloss.NewStyle().
-		Background(pc)
-
-	titleStyle = lipgloss.NewStyle().
-		Bold(true).
-		Foreground(pc).
-		PaddingLeft(2).
-		PaddingTop(2).
-		PaddingBottom(1)
-
-	selectedItemStyle = lipgloss.NewStyle().
-		Foreground(pc).
-		Bold(true)
-
-	footerStyle = lipgloss.NewStyle().Background(sc).Foreground(lipgloss.Color("#888888"))
-	footerKeyStyle = lipgloss.NewStyle().Background(sc).Foreground(pc).Bold(true)
-
-	errorStyle = lipgloss.NewStyle().Foreground(pc)
-	labelStyle = lipgloss.NewStyle().Bold(true).Foreground(pc)
-	deleteStyle = lipgloss.NewStyle().Bold(true).Foreground(pc)
-}
