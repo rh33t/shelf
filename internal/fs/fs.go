@@ -3,18 +3,24 @@ package fs
 import (
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strings"
+	"time"
 )
+
+// maxWalkDepth bounds the ctrl+f search to the deepest structural level
+// (platform/category/challenge) so it never descends into a target's own
+// working files.
+const maxWalkDepth = 3
 
 var (
 	reNonAlphaNum = regexp.MustCompile(`[^a-z0-9\s-]`)
 	reMultiSep    = regexp.MustCompile(`[-\s]+`)
 )
 
-// Slugify converts text to kebab-case ASCII slug, matching the Python tool's behavior.
+// Slugify converts text to a kebab-case ASCII slug.
 func Slugify(text string) string {
 	text = strings.ToLower(text)
 	// Strip non-ASCII characters
@@ -32,21 +38,33 @@ func Slugify(text string) string {
 	return text
 }
 
-// WalkAllDirs returns all subdirectory paths under root, relative to root.
+// WalkAllDirs returns subdirectory paths under root, relative to root, most
+// recently modified first. Dot directories and anything past maxWalkDepth are
+// skipped.
 func WalkAllDirs(root string) ([]string, error) {
-	var results []string
+	var found []dirInfo
 	err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
-		if err != nil || path == root || !d.IsDir() {
+		if err != nil || path == root {
 			return nil
 		}
+		if !d.IsDir() {
+			return nil
+		}
+		if strings.HasPrefix(d.Name(), ".") {
+			return filepath.SkipDir
+		}
 		rel, _ := filepath.Rel(root, path)
-		results = append(results, rel)
+		found = append(found, dirInfo{rel, modTime(d)})
+		if strings.Count(rel, string(filepath.Separator))+1 >= maxWalkDepth {
+			return filepath.SkipDir
+		}
 		return nil
 	})
-	return results, err
+	return byRecency(found), err
 }
 
-// ListDirs returns the names of subdirectories in dir.
+// ListDirs returns the names of subdirectories in dir, most recently modified
+// first.
 func ListDirs(dir string) ([]string, error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
@@ -55,44 +73,18 @@ func ListDirs(dir string) ([]string, error) {
 		}
 		return nil, err
 	}
-	var dirs []string
+	var dirs []dirInfo
 	for _, e := range entries {
 		if e.IsDir() {
-			dirs = append(dirs, e.Name())
+			dirs = append(dirs, dirInfo{e.Name(), modTime(e)})
 		}
 	}
-	return dirs, nil
+	return byRecency(dirs), nil
 }
 
 // MkdirAll creates dir and all parents with 0755 permissions.
 func MkdirAll(path string) error {
 	return os.MkdirAll(path, 0755)
-}
-
-// SpawnTmux creates a tmux session named sessionName with dir as the working
-// directory. If the session already exists it is reused. When called from
-// inside an existing tmux session the client is switched to the new session
-// automatically; otherwise the session is left detached for manual attachment.
-func SpawnTmux(sessionName, dir string) error {
-	if _, err := exec.LookPath("tmux"); err != nil {
-		return fmt.Errorf("tmux not found in PATH")
-	}
-
-	// Create only if the session does not already exist.
-	if err := exec.Command("tmux", "has-session", "-t", sessionName).Run(); err != nil {
-		if err := exec.Command("tmux", "new-session", "-d", "-s", sessionName, "-c", dir).Run(); err != nil {
-			return fmt.Errorf("creating tmux session %q: %w", sessionName, err)
-		}
-	}
-
-	// Switch to it if we are already inside tmux.
-	if os.Getenv("TMUX") != "" {
-		if err := exec.Command("tmux", "switch-client", "-t", sessionName).Run(); err != nil {
-			return fmt.Errorf("switching to tmux session %q: %w", sessionName, err)
-		}
-	}
-
-	return nil
 }
 
 // DeleteDir removes dir and all its contents.
@@ -105,50 +97,43 @@ func RenameDir(oldPath, newPath string) error {
 	return os.Rename(oldPath, newPath)
 }
 
-// WriteNotesTemplate creates notes.md for a new box.
-func WriteNotesTemplate(dir, platform, box string) error {
-	content := fmt.Sprintf(
-		"# Notes for %s\n\n"+
-			"## Box Information\n"+
-			"- Platform: %s\n"+
-			"- Box Name: %s\n"+
-			"- Difficulty:\n"+
-			"- IP Address: \n"+
-			"- Target OS: \n\n"+
-			"## Initial Reconnaissance\n"+
-			"```bash\n"+
-			"# Nmap full scan\n"+
-			"fastmap %s\n"+
-			"```\n\n"+
-			"## Enumeration\n\n"+
-			"### Commands & tools used\n"+
-			"```bash\n"+
-			"# something great\n"+
-			"```\n\n"+
-			"## Exploitation\n\n"+
-			"### Initial Access\n"+
-			"```bash\n"+
-			"# Exploit commands\n"+
-			"```\n\n"+
-			"## Privilege Escalation\n\n"+
-			"### Local Enumeration\n"+
-			"```bash\n"+
-			"# Enumeration commands\n"+
-			"```\n\n"+
-			"### Escalation\n"+
-			"```bash\n"+
-			"# Privilege escalation commands\n"+
-			"```\n\n"+
-			"### Loot\n"+
-			"- User Flag: \n"+
-			"- Root Flag: \n\n"+
-			"## Errors Made\n"+
-			"- \n\n"+
-			"## Lessons Learned\n"+
-			"- \n\n"+
-			"## References\n"+
-			"- \n",
-		box, platform, box, box,
-	)
+// WriteBoxNotes creates notes.md for a new box.
+func WriteBoxNotes(dir, platform, box string) error {
+	return writeNotes(dir, fmt.Sprintf(
+		"# %s\n\n- Platform: %s\n- IP:\n\n## Recon\n\n## Foothold\n\n## Privesc\n\n## Flag\n\n- user:\n- root:\n",
+		box, platform))
+}
+
+// WriteChallengeNotes creates notes.md for a new CTF challenge.
+func WriteChallengeNotes(dir, source, category, challenge string) error {
+	return writeNotes(dir, fmt.Sprintf(
+		"# %s\n\n- Source: %s\n- Category: %s\n\n## Analysis\n\n## Solution\n\n## Flag\n\n-\n",
+		challenge, source, category))
+}
+
+func writeNotes(dir, content string) error {
 	return os.WriteFile(filepath.Join(dir, "notes.md"), []byte(content), 0644)
+}
+
+type dirInfo struct {
+	name string
+	mod  time.Time
+}
+
+// byRecency sorts newest first so the last target worked on stays at the top.
+func byRecency(dirs []dirInfo) []string {
+	sort.SliceStable(dirs, func(i, j int) bool { return dirs[i].mod.After(dirs[j].mod) })
+	names := make([]string, len(dirs))
+	for i, d := range dirs {
+		names[i] = d.name
+	}
+	return names
+}
+
+func modTime(d os.DirEntry) time.Time {
+	info, err := d.Info()
+	if err != nil {
+		return time.Time{}
+	}
+	return info.ModTime()
 }

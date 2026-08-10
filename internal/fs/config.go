@@ -16,23 +16,38 @@ const appName = "shelf"
 // Config holds all user-configurable values.
 // To add a new field: add it here + set its default in defaults().
 type Config struct {
-	PrimaryColor   string `yaml:"primary_color"`
-	SecondaryColor string `yaml:"secondary_color"`
-	Cmd            string `yaml:"cmd"`
+	BaseDir       string   `yaml:"base_dir"`
+	Cmd           string   `yaml:"cmd"`
+	CTFSources    []string `yaml:"ctf_sources"`
+	CTFCategories []string `yaml:"ctf_categories"`
+	BoxPlatforms  []string `yaml:"box_platforms"`
 }
 
 // defaults returns the baseline config.
 // Every field must have a value here.
 func defaults() Config {
 	return Config{
-		PrimaryColor:   "#7aa2f7",
-		SecondaryColor: "#1a1b26",
-		Cmd:            "tmux new-session -ds $session -c $path 2>/dev/null; tmux switch-client -t $session 2>/dev/null || true",
+		BaseDir:    "~/work",
+		Cmd:        "tmux new-session -ds $session -c $path 2>/dev/null; tmux switch-client -t $session 2>/dev/null || tmux attach -t $session",
+		CTFSources: []string{"hackthebox", "picoctf", "root-me", "tryhackme"},
+		CTFCategories: []string{
+			"web",
+			"reverse",
+			"binary",
+			"crypto",
+			"forensics",
+			"osint",
+			"steganography",
+			"mobile",
+			"blockchain",
+			"misc",
+		},
+		BoxPlatforms: []string{"hackthebox", "tryhackme", "hackmyvm"},
 	}
 }
 
 // LoadConfig reads ~/.config/shelf/config.yaml and merges it over the defaults.
-// If no config file exists, the defaults are returned as-is.
+// If no config file exists, one is written with the defaults.
 func LoadConfig() (*Config, error) {
 	cfg := defaults()
 
@@ -44,12 +59,13 @@ func LoadConfig() (*Config, error) {
 	data, err := os.ReadFile(path)
 	if errors.Is(err, os.ErrNotExist) {
 		// Fall back to .yml extension.
-		alt := path[:len(path)-len(".yaml")] + ".yml"
+		alt := strings.TrimSuffix(path, ".yaml") + ".yml"
 		data, err = os.ReadFile(alt)
 		if errors.Is(err, os.ErrNotExist) {
 			if err := writeDefaultConfig(path, cfg); err != nil {
 				return nil, fmt.Errorf("config: init %s: %w", path, err)
 			}
+			cfg.resolveBaseDir()
 			return &cfg, nil
 		}
 		if err != nil {
@@ -68,23 +84,30 @@ func LoadConfig() (*Config, error) {
 	// Only override fields that are explicitly set in the file.
 	// Empty fields keep their default value.
 	merge(&cfg, fromFile)
-
-	if err := cfg.validate(); err != nil {
-		return nil, fmt.Errorf("config: %w", err)
-	}
+	cfg.resolveBaseDir()
 
 	return &cfg, nil
 }
 
 // Path returns the resolved config file path.
-// Useful for a --show-config flag.
 func Path() (string, error) {
 	return configPath()
 }
 
-// ExpandCmd substitutes $session and $path in Cmd.
-func (c *Config) ExpandCmd(session, path string) string {
-	return strings.NewReplacer("$session", session, "$path", path).Replace(c.Cmd)
+// Command returns the argv running the configured cmd. $session and $path are
+// passed as positional parameters rather than interpolated into the script, so
+// directory names containing shell metacharacters cannot execute.
+func (c *Config) Command(session, path string) []string {
+	script := strings.NewReplacer("$session", `"$1"`, "$path", `"$2"`).Replace(c.Cmd)
+	return []string{"sh", "-c", script, appName, session, path}
+}
+
+// resolveBaseDir applies the SHELF_BASE_DIR override and expands a leading ~.
+func (c *Config) resolveBaseDir() {
+	if v := os.Getenv("SHELF_BASE_DIR"); v != "" {
+		c.BaseDir = v
+	}
+	c.BaseDir = ExpandHome(c.BaseDir)
 }
 
 // merge overwrites non-zero fields of dst with values from src.
@@ -99,49 +122,44 @@ func merge(dst *Config, src Config) {
 	}
 }
 
-func (c *Config) validate() error {
-	if !isValidHex(c.PrimaryColor) {
-		return fmt.Errorf("primary_color %q is not a valid hex color", c.PrimaryColor)
+// ExpandHome resolves a leading ~ to the user's home directory.
+func ExpandHome(path string) string {
+	if path != "~" && !strings.HasPrefix(path, "~/") {
+		return path
 	}
-	if !isValidHex(c.SecondaryColor) {
-		return fmt.Errorf("secondary_color %q is not a valid hex color", c.SecondaryColor)
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return path
 	}
-	return nil
-}
-
-func isValidHex(s string) bool {
-	if len(s) == 0 || s[0] != '#' {
-		return false
+	if path == "~" {
+		return home
 	}
-	rest := s[1:]
-	if len(rest) != 3 && len(rest) != 6 {
-		return false
-	}
-	for _, c := range rest {
-		if !('0' <= c && c <= '9') && !('a' <= c && c <= 'f') && !('A' <= c && c <= 'F') {
-			return false
-		}
-	}
-	return true
+	return filepath.Join(home, path[2:])
 }
 
 func writeDefaultConfig(path string, cfg Config) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}
-	content := fmt.Sprintf(`# shelf configuration
+	header := `# shelf configuration
+#
+# base_dir       workspace root, overridden by $SHELF_BASE_DIR
+# cmd            run after selecting a directory
+#                variables: $session (directory name), $path (full path)
+#
+# The three lists below are offered in the picker whether or not they exist
+# on disk. Nothing is created until you select it.
+#
+# ctf_sources    permanent challenge sources; one-off events are typed in
+# ctf_categories challenge categories, under every source
+# box_platforms  box platforms
 
-# Accent color (hex)
-primary_color: "%s"
-
-# Background / secondary color (hex)
-secondary_color: "%s"
-
-# Command to run after selecting a directory.
-# Available variables: $session (directory name), $path (full path)
-cmd: "%s"
-`, cfg.PrimaryColor, cfg.SecondaryColor, cfg.Cmd)
-	return os.WriteFile(path, []byte(content), 0o644)
+`
+	body, err := yaml.Marshal(cfg)
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(path, append([]byte(header), body...), 0o644)
 }
 
 func configPath() (string, error) {
